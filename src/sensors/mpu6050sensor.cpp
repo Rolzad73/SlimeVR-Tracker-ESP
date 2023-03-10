@@ -1,6 +1,6 @@
 /*
     SlimeVR Code is placed under the MIT license
-    Copyright (c) 2021 Eiren Rain
+    Copyright (c) 2021 Eiren Rain & SlimeVR contributors
 
     Permission is hereby granted, free of charge, to any person obtaining a copy
     of this software and associated documentation files (the "Software"), to deal
@@ -33,21 +33,45 @@
 #include "network/network.h"
 #include <i2cscan.h>
 #include "calibration.h"
-#include "configuration.h"
-#include "ledmgr.h"
+#include "GlobalVars.h"
+
+#define ACCEL_SENSITIVITY_2G 16384.0f
+
+// Accel scale conversion steps: LSB/G -> G -> m/s^2
+constexpr float ASCALE_2G = ((32768. / ACCEL_SENSITIVITY_2G) / 32768.) * EARTH_GRAVITY;
 
 void MPU6050Sensor::motionSetup()
 {
-    //DeviceConfig * const config = getConfigPtr();
-
     imu.initialize(addr);
     if (!imu.testConnection())
     {
-        m_Logger.fatal("Can't connect to MPU6050 (0x%02x) at address 0x%02x", imu.getDeviceID(), addr);
+        m_Logger.fatal("Can't connect to %s (reported device ID 0x%02x) at address 0x%02x", getIMUNameByType(sensorType), imu.getDeviceID(), addr);
         return;
     }
 
-    m_Logger.info("Connected to MPU6050 (0x%02x) at address 0x%02x", imu.getDeviceID(), addr);
+    m_Logger.info("Connected to %s (reported device ID 0x%02x) at address 0x%02x", getIMUNameByType(sensorType), imu.getDeviceID(), addr);
+
+#ifndef IMU_MPU6050_RUNTIME_CALIBRATION
+    // Initialize the configuration
+    {
+        SlimeVR::Configuration::CalibrationConfig sensorCalibration = configuration.getCalibration(sensorId);
+        // If no compatible calibration data is found, the calibration data will just be zero-ed out
+        switch (sensorCalibration.type) {
+        case SlimeVR::Configuration::CalibrationConfigType::MPU6050:
+            m_Calibration = sensorCalibration.data.mpu6050;
+            break;
+
+        case SlimeVR::Configuration::CalibrationConfigType::NONE:
+            m_Logger.warn("No calibration data found for sensor %d, ignoring...", sensorId);
+            m_Logger.info("Calibration is advised");
+            break;
+
+        default:
+            m_Logger.warn("Incompatible calibration data found for sensor %d, ignoring...", sensorId);
+            m_Logger.info("Calibration is advised");
+        }
+    }
+#endif
 
     devStatus = imu.dmpInitialize();
 
@@ -66,7 +90,7 @@ void MPU6050Sensor::motionSetup()
         imu.PrintActiveOffsets();
 #endif // IMU_MPU6050_RUNTIME_CALIBRATION
 
-        LEDManager::pattern(LOADING_LED, 50, 50, 5);
+        ledManager.pattern(50, 50, 5);
 
         // turn on the DMP, now that it's ready
         m_Logger.debug("Enabling DMP...");
@@ -116,6 +140,28 @@ void MPU6050Sensor::motionLoop()
         quaternion.set(-rawQuat.y, rawQuat.x, rawQuat.z, rawQuat.w);
         quaternion *= sensorOffset;
 
+    #if SEND_ACCELERATION
+        {
+            VectorFloat gravity;
+            this->imu.dmpGetGravity(&gravity, &this->rawQuat);
+
+            // dmpGetGravity returns a value that is the percentage of gravity that each axis is experiencing.
+            // dmpGetLinearAccel by default compensates this to be in 4g mode because of that
+            // we need to multiply by the gravity scale by two to convert to 2g mode
+            gravity.x *= 2;
+            gravity.y *= 2;
+            gravity.z *= 2;
+
+            this->imu.dmpGetAccel(&this->rawAccel, this->fifoBuffer);
+            this->imu.dmpGetLinearAccel(&this->rawAccel, &this->rawAccel, &gravity);
+
+            // convert acceleration to m/s^2 (implicitly casts to float)
+            this->acceleration[0] = this->rawAccel.x * ASCALE_2G;
+            this->acceleration[1] = this->rawAccel.y * ASCALE_2G;
+            this->acceleration[2] = this->rawAccel.z * ASCALE_2G;
+        }
+    #endif
+        
 #if ENABLE_INSPECTION
         {
             Network::sendInspectionFusedIMUData(sensorId, quaternion);
@@ -131,7 +177,8 @@ void MPU6050Sensor::motionLoop()
 }
 
 void MPU6050Sensor::startCalibration(int calibrationType) {
-    LEDManager::on(CALIBRATING_LED);
+    ledManager.on();
+
 #ifdef IMU_MPU6050_RUNTIME_CALIBRATION
     m_Logger.info("MPU is using automatic runtime calibration. Place down the device and it should automatically calibrate after a few seconds");
 
@@ -142,11 +189,9 @@ void MPU6050Sensor::startCalibration(int calibrationType) {
         Network::sendCalibrationFinished(CALIBRATION_TYPE_INTERNAL_ACCEL, 0);
         break;
     case CALIBRATION_TYPE_INTERNAL_GYRO:
-        Network::sendCalibrationFinished(CALIBRATION_TYPE_INTERNAL_ACCEL, 0);
+        Network::sendCalibrationFinished(CALIBRATION_TYPE_INTERNAL_GYRO, 0);//was CALIBRATION_TYPE_INTERNAL_GYRO for some reason? there wasn't a point to this switch
         break;
     }
-    LEDManager::off(CALIBRATING_LED);
-
 #else //!IMU_MPU6050_RUNTIME_CALIBRATION
     m_Logger.info("Put down the device and wait for baseline gyro reading calibration");
     delay(2000);
@@ -158,30 +203,32 @@ void MPU6050Sensor::startCalibration(int calibrationType) {
 
     m_Logger.debug("Gathered baseline gyro reading");
     m_Logger.debug("Starting offset finder");
-    DeviceConfig *const config = getConfigPtr();
-
     switch (calibrationType)
     {
     case CALIBRATION_TYPE_INTERNAL_ACCEL:
         imu.CalibrateAccel(10);
-        sendCalibrationFinished(CALIBRATION_TYPE_INTERNAL_ACCEL, 0, PACKET_RAW_CALIBRATION_DATA);
-        config->calibration.A_B[0] = imu.getXAccelOffset();
-        config->calibration.A_B[1] = imu.getYAccelOffset();
-        config->calibration.A_B[2] = imu.getZAccelOffset();
-        saveConfig();
+        Network::sendCalibrationFinished(CALIBRATION_TYPE_INTERNAL_ACCEL, 0);//doesn't send calibration data anymore, has that been depricated in server?
+        m_Calibration.A_B[0] = imu.getXAccelOffset();
+        m_Calibration.A_B[1] = imu.getYAccelOffset();
+        m_Calibration.A_B[2] = imu.getZAccelOffset();
         break;
     case CALIBRATION_TYPE_INTERNAL_GYRO:
         imu.CalibrateGyro(10);
-        sendCalibrationFinished(CALIBRATION_TYPE_INTERNAL_ACCEL, 0, PACKET_RAW_CALIBRATION_DATA);
-        config->calibration.G_off[0] = imu.getXGyroOffset();
-        config->calibration.G_off[1] = imu.getYGyroOffset();
-        config->calibration.G_off[2] = imu.getZGyroOffset();
-        saveConfig();
+        Network::sendCalibrationFinished(CALIBRATION_TYPE_INTERNAL_GYRO, 0);//doesn't send calibration data anymore
+        m_Calibration.G_off[0] = imu.getXGyroOffset();
+        m_Calibration.G_off[1] = imu.getYGyroOffset();
+        m_Calibration.G_off[2] = imu.getZGyroOffset();
         break;
     }
 
-    m_Logger.info("Calibration finished");
-    LEDMGR::off(CALIBRATING_LED);
+    SlimeVR::Configuration::CalibrationConfig calibration;
+    calibration.type = SlimeVR::Configuration::CalibrationConfigType::MPU6050;
+    calibration.data.mpu6050 = m_Calibration;
+    configuration.setCalibration(sensorId, calibration);
+    configuration.save();
 
+    m_Logger.info("Calibration finished");
 #endif // !IMU_MPU6050_RUNTIME_CALIBRATION
+
+    ledManager.off();
 }

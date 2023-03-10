@@ -1,6 +1,6 @@
 /*
     SlimeVR Code is placed under the MIT license
-    Copyright (c) 2021 Eiren Rain
+    Copyright (c) 2021 Eiren Rain & SlimeVR contributors
 
     Permission is hereby granted, free of charge, to any person obtaining a copy
     of this software and associated documentation files (the "Software"), to deal
@@ -23,17 +23,17 @@
 
 #include "sensors/bno080sensor.h"
 #include "network/network.h"
-#include "ledmgr.h"
 #include "utils.h"
+#include "GlobalVars.h"
 
 void BNO080Sensor::motionSetup()
 {
-#ifdef FULL_DEBUG
+#ifdef DEBUG_SENSOR
     imu.enableDebugging(Serial);
 #endif
-    if(!imu.begin(addr, Wire, intPin)) {
+    if(!imu.begin(addr, Wire, m_IntPin)) {
         m_Logger.fatal("Can't connect to %s at address 0x%02x", getIMUNameByType(sensorType), addr);
-        LEDManager::signalAssert();
+        ledManager.pattern(50, 50, 200);
         return;
     }
 
@@ -52,30 +52,27 @@ void BNO080Sensor::motionSetup()
                   imu.swVersionPatch
                 );
 
-    bool useStabilization = false;
-#ifdef BNO_USE_ARVR_STABILIZATION
-    useStabilization = true;
-#endif
-    if(useStabilization && (sensorType == IMU_BNO085 || sensorType == IMU_BNO086)) {
-        if(useMagnetometerAllTheTime) {
-            imu.enableARVRStabilizedRotationVector(10);
-        } else {
-            imu.enableARVRStabilizedGameRotationVector(10);
-            if (useMagnetometerCorrection)
-                imu.enableRotationVector(1000);
-        }
-    } else {
-        if(useMagnetometerAllTheTime) {
-            imu.enableRotationVector(10);
-        } else {
-            imu.enableGameRotationVector(10);
-            if(useMagnetometerCorrection)
-                imu.enableRotationVector(1000);
-        }
-    }
-    imu.enableTapDetector(100);
+    this->imu.enableLinearAccelerometer(10);
 
-#ifdef ENABLE_INSPECTION
+#if USE_6_AXIS
+    #if (IMU == IMU_BNO085 || IMU == IMU_BNO086) && BNO_USE_ARVR_STABILIZATION
+    imu.enableARVRStabilizedGameRotationVector(10);
+    #else
+    imu.enableGameRotationVector(10);
+    #endif
+
+    #if BNO_USE_MAGNETOMETER_CORRECTION
+    imu.enableRotationVector(1000);
+    #endif
+#else
+    #if (IMU == IMU_BNO085 || IMU == IMU_BNO086) && BNO_USE_ARVR_STABILIZATION
+    imu.enableARVRStabilizedRotationVector(10);
+    #else
+    imu.enableRotationVector(10);
+    #endif
+#endif
+
+#if ENABLE_INSPECTION
     imu.enableRawGyro(10);
     imu.enableRawAccelerometer(10);
     imu.enableRawMagnetometer(10);
@@ -92,6 +89,7 @@ void BNO080Sensor::motionLoop()
     //Look for reports from the IMU
     while (imu.dataAvailable())
     {
+        hadData = true;
 #if ENABLE_INSPECTION
         {
             int16_t rX = imu.getRawGyroX();
@@ -115,67 +113,73 @@ void BNO080Sensor::motionLoop()
 
         lastReset = 0;
         lastData = millis();
-        if (useMagnetometerAllTheTime || !useMagnetometerCorrection)
+
+#if USE_6_AXIS
+        if (imu.hasNewGameQuat())
         {
-            if (imu.hasNewQuat())
+            imu.getGameQuat(quaternion.x, quaternion.y, quaternion.z, quaternion.w, calibrationAccuracy);
+            quaternion *= sensorOffset;
+    #if SEND_ACCELERATION
             {
-                imu.getQuat(quaternion.x, quaternion.y, quaternion.z, quaternion.w, magneticAccuracyEstimate, calibrationAccuracy);
-                quaternion *= sensorOffset;
-
-#if ENABLE_INSPECTION
-                {
-                    Network::sendInspectionFusedIMUData(sensorId, quaternion);
-                }
-#endif
-
-                if (!OPTIMIZE_UPDATES || !lastQuatSent.equalsWithEpsilon(quaternion))
-                {
-                    newData = true;
-                    lastQuatSent = quaternion;
-                }
+                uint8_t acc;
+                this->imu.getLinAccel(this->acceleration[0], this->acceleration[1], this->acceleration[2], acc);
             }
-        }
-        else
-        {
-            if (imu.hasNewGameQuat())
+    #endif // SEND_ACCELERATION
+
+    #if ENABLE_INSPECTION
             {
-                imu.getGameQuat(quaternion.x, quaternion.y, quaternion.z, quaternion.w, calibrationAccuracy);
-                quaternion *= sensorOffset;
+                Network::sendInspectionFusedIMUData(sensorId, quaternion);
+            }
+    #endif // ENABLE_INSPECTION
 
-#if ENABLE_INSPECTION
-                {
-                    Network::sendInspectionFusedIMUData(sensorId, quaternion);
-                }
-#endif
-
+            if (!OPTIMIZE_UPDATES || !lastQuatSent.equalsWithEpsilon(quaternion))
+            {
                 newData = true;
-            }
-            if (imu.hasNewMagQuat())
-            {
-                imu.getMagQuat(magQuaternion.x, magQuaternion.y, magQuaternion.z, magQuaternion.w, magneticAccuracyEstimate, magCalibrationAccuracy);
-                magQuaternion *= sensorOffset;
-
-#if ENABLE_INSPECTION
-                {
-                    Network::sendInspectionCorrectionData(sensorId, quaternion);
-                }
-#endif
-
-                newMagData = true;
+                lastQuatSent = quaternion;
             }
         }
+
+    #if BNO_USE_MAGNETOMETER_CORRECTION
+        if (imu.hasNewMagQuat())
+        {
+            imu.getMagQuat(magQuaternion.x, magQuaternion.y, magQuaternion.z, magQuaternion.w, magneticAccuracyEstimate, magCalibrationAccuracy);
+            magQuaternion *= sensorOffset;
+
+        #if ENABLE_INSPECTION
+            {
+                Network::sendInspectionCorrectionData(sensorId, quaternion);
+            }
+        #endif // ENABLE_INSPECTION
+
+            newMagData = true;
+        }
+    #endif // BNO_USE_MAGNETOMETER_CORRECTION
+#else // USE_6_AXIS
+
+        if (imu.hasNewQuat())
+        {
+            imu.getQuat(quaternion.x, quaternion.y, quaternion.z, quaternion.w, magneticAccuracyEstimate, calibrationAccuracy);
+            quaternion *= sensorOffset;
+
+    #if ENABLE_INSPECTION
+            {
+                Network::sendInspectionFusedIMUData(sensorId, quaternion);
+            }
+    #endif // ENABLE_INSPECTION
+
+            if (!OPTIMIZE_UPDATES || !lastQuatSent.equalsWithEpsilon(quaternion))
+            {
+                newData = true;
+                lastQuatSent = quaternion;
+            }
+        }
+#endif // USE_6_AXIS
+
         if (imu.getTapDetected())
         {
             tap = imu.getTapDetector();
         }
-        if (imu.hasNewAccel())
-        {
-            float v[3];
-            uint8_t acc;
-            imu.getAccel(v[0], v[1], v[2], acc);
-            Network::sendAccel(v, PACKET_ACCEL);
-        }
-        if (intPin == 255 || imu.I2CTimedOut())
+        if (m_IntPin == 255 || imu.I2CTimedOut())
             break;
     }
     if (lastData + 1000 < millis() && configured)
@@ -188,7 +192,7 @@ void BNO080Sensor::motionLoop()
             m_Logger.error("BNO08X error. Severity: %d, seq: %d, src: %d, err: %d, mod: %d, code: %d",
                 error.severity, error.error_sequence_number, error.error_source, error.error, error.error_module, error.error_code);
         }
-        LEDManager::setLedStatus(LED_STATUS_IMU_ERROR);
+        statusManager.setStatus(SlimeVR::Status::IMU_ERROR, true);
         working = false;
         lastData = millis();
         uint8_t rr = imu.resetReason();
@@ -213,19 +217,29 @@ void BNO080Sensor::sendData()
     {
         newData = false;
         Network::sendRotationData(&quaternion, DATA_TYPE_NORMAL, calibrationAccuracy, sensorId);
-        if (useMagnetometerAllTheTime)
-            Network::sendMagnetometerAccuracy(magneticAccuracyEstimate, sensorId);
 
-#ifdef FULL_DEBUG
+#if SEND_ACCELERATION
+        Network::sendAccel(this->acceleration, this->sensorId);
+#endif
+
+#if !USE_6_AXIS
+        Network::sendMagnetometerAccuracy(magneticAccuracyEstimate, sensorId);
+#endif
+
+#ifdef DEBUG_SENSOR
         m_Logger.trace("Quaternion: %f, %f, %f, %f", UNPACK_QUATERNION(quaternion));
 #endif
     }
+
+#if USE_6_AXIS && BNO_USE_MAGNETOMETER_CORRECTION
     if (newMagData)
     {
         newMagData = false;
         Network::sendRotationData(&magQuaternion, DATA_TYPE_CORRECTION, magCalibrationAccuracy, sensorId);
         Network::sendMagnetometerAccuracy(magneticAccuracyEstimate, sensorId);
     }
+#endif
+
     if (tap != 0)
     {
         Network::sendTap(tap, sensorId);
@@ -236,16 +250,16 @@ void BNO080Sensor::sendData()
 void BNO080Sensor::startCalibration(int calibrationType)
 {
     // TODO It only calibrates gyro, it should have multiple calibration modes, and check calibration status in motionLoop()
-    LEDManager::pattern(CALIBRATING_LED, 20, 20, 10);
-    LEDManager::blink(CALIBRATING_LED, 2000);
+    ledManager.pattern(20, 20, 10);
+    ledManager.blink(2000);
     imu.calibrateGyro();
     do
     {
-        LEDManager::on(CALIBRATING_LED);
+        ledManager.on();
         imu.requestCalibrationStatus();
         delay(20);
         imu.getReadings();
-        LEDManager::off(CALIBRATING_LED);
+        ledManager.off();
         delay(20);
     } while (!imu.calibrationComplete());
     imu.saveCalibration();

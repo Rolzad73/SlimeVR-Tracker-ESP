@@ -1,6 +1,6 @@
 /*
     SlimeVR Code is placed under the MIT license
-    Copyright (c) 2021 Eiren Rain & SlimeVR contributors
+    Copyright (c) 2022 TheDevMinerTV
 
     Permission is hereby granted, free of charge, to any person obtaining a copy
     of this software and associated documentation files (the "Software"), to deal
@@ -20,28 +20,45 @@
     OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
     THE SOFTWARE.
 */
-#ifndef SLIMEVR_SENSORFACTORY_H_
-#define SLIMEVR_SENSORFACTORY_H_
+
+#ifndef SLIMEVR_SENSORMANAGER
+#define SLIMEVR_SENSORMANAGER
 
 #include "globals.h"
 #include "sensor.h"
+#include "EmptySensor.h"
+#include "logging/Logger.h"
 
-class SensorFactory
+namespace SlimeVR
 {
-public:
-    SensorFactory();
-    ~SensorFactory();
-    void create();
-    void motionSetup();
-    void motionLoop();
-    void sendData();
-    void startCalibration(int sensorId, int calibrationType);
-    Sensor *getFirst() { return sensor1; };
-    Sensor *getSecond() { return sensor2; };
+    namespace Sensors
+    {
+        class SensorManager
+        {
+        public:
+            SensorManager()
+                : m_Logger(SlimeVR::Logging::Logger("SensorManager")), m_Sensor1(new EmptySensor(0)), m_Sensor2(new EmptySensor(0)) {}
+            ~SensorManager()
+            {
+                delete m_Sensor1;
+                delete m_Sensor2;
+            }
 
-protected:
-    Sensor *sensor1;
-    Sensor *sensor2;
-};
+            void setup();
+            void postSetup();
+
+            void update();
+
+            Sensor *getFirst() { return m_Sensor1; };
+            Sensor *getSecond() { return m_Sensor2; };
+
+        private:
+            SlimeVR::Logging::Logger m_Logger;
+
+            Sensor *m_Sensor1;
+            Sensor *m_Sensor2;
+        };
+    }
+}
 
 #endif // SLIMEVR_SENSORFACTORY_H_

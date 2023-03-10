@@ -1,6 +1,6 @@
 /*
     SlimeVR Code is placed under the MIT license
-    Copyright (c) 2021 Eiren Rain
+    Copyright (c) 2022 TheDevMinerTV
 
     Permission is hereby granted, free of charge, to any person obtaining a copy
     of this software and associated documentation files (the "Software"), to deal
@@ -21,30 +21,17 @@
     THE SOFTWARE.
 */
 
-#ifndef SLIMEVR_CONFIG_H_
-#define SLIMEVR_CONFIG_H_
+#ifndef GLOBALVARS_H
+#define GLOBALVARS_H
 
-struct CalibrationConfig {
-    //accel offsets and correction matrix
-    float A_B[3];
-    float A_Ainv[3][3];
-    // mag offsets and correction matrix
-    float M_B[3];
-    float M_Ainv[3][3];
-    //raw offsets, determined for gyro at rest
-    float G_off[3];
-    // calibration temperature for dynamic compensation
-    float temperature;
-};
+#include "LEDManager.h"
+#include "status/StatusManager.h"
+#include "configuration/Configuration.h"
+#include "sensors/SensorManager.h"
 
-struct DeviceConfig {
-    CalibrationConfig calibration[2];
-    int deviceId;
-    int deviceMode;
-};
+extern SlimeVR::LEDManager ledManager;
+extern SlimeVR::Status::StatusManager statusManager;
+extern SlimeVR::Configuration::Configuration configuration;
+extern SlimeVR::Sensors::SensorManager sensorManager;
 
-DeviceConfig * const getConfigPtr();
-void setConfig(const DeviceConfig & config);
-void saveConfig();
-
-#endif // SLIMEVR_CONFIG_H_
+#endif
